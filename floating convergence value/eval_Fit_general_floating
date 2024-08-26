@@ -1,0 +1,250 @@
+import torch
+import torch.nn as nn
+import pandas as pd
+import torch.optim as optim
+from tqdm import tqdm
+import random
+import json
+import numpy as np
+from matplotlib import pyplot as plt
+import time
+import os
+from torch.autograd import Variable
+from sklearn.metrics import r2_score, mean_squared_error
+from support_models import generate_fake_sample
+
+
+def setup_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    
+
+class CorrelationLoss(nn.Module):
+    def __init__(self):
+        super(CorrelationLoss, self).__init__()
+
+    def forward(self, output, target):
+        squared_difference = torch.pow((100*(output - target)), 2) * (torch.abs(1-target))
+        weighted_difference = squared_difference 
+        CorrelationLoss = torch.mean(weighted_difference)
+
+        return CorrelationLoss
+
+
+class Fit_general_type(nn.Module):
+    def __init__(self):
+        super(Fit_general_type, self).__init__()
+        """ self.G0 = nn.Parameter(torch.tensor([inG0], requires_grad=True)) """
+        self.G0 = nn.Parameter(torch.rand(1, requires_grad=False))
+        self.Td = nn.Parameter(torch.rand(1, requires_grad=True))
+        # self.Td = nn.Parameter(torch.rand(1, requires_grad=True))
+        # self.Td = nn.Parameter(torch.tensor([intd], requires_grad=False))
+        self.T = nn.Parameter(torch.rand(1, requires_grad=True))
+        # self.T = nn.Parameter(torch.tensor([inT], requires_grad=False))
+        # self.f = nn.Parameter(torch.rand(1, requires_grad=True))
+        self.Tt = nn.Parameter(torch.rand(1, requires_grad=True))
+        # self.Tt = nn.Parameter(torch.tensor([inTt], requires_grad=False))
+        self.s = nn.Parameter(torch.tensor([0.0], requires_grad=True))
+        self.f = nn.Parameter(torch.rand(1, requires_grad=True))
+        self.c = nn.Parameter(torch.rand(1, requires_grad=True))
+        """ self.f = nn.Parameter(torch.tensor([0.0], requires_grad=True)) """
+
+    def regular(self):
+        """ G0 = torch.sigmoid(self.G0) """
+        G0 = torch.abs(self.G0)
+        Td = torch.abs(self.Td)
+        T = torch.abs(torch.sigmoid(self.T)-0.5)
+        """ T = torch.abs(self.T-self.T)+ 0 """
+        Tt = torch.abs(self.Tt)
+        """ Tt = torch.abs(self.T-self.T)+ 0 """
+        s = 0.1 + 0.216 * torch.sigmoid(self.s)
+        """ s = 0.6 + (1*(0.5-torch.sigmoid(self.s))) """
+        """ s = 1-torch.abs(torch.sigmoid(self.s)-0.5) """
+        """ s = (self.s-self.s)+0.55 """
+        f = torch.sigmoid(self.f)
+        """ f = torch.abs(self.f)/(torch.abs(self.f)+1) """
+        """ f = torch.abs(torch.sigmoid(self.f)-0.5) """
+        """ f = (self.f-self.f)+0.65231 """
+        c = self.c 
+        
+        return c, G0, Td, T, Tt, s, f
+    
+
+    def forward(self, x):
+        c, G0, Td, T, Tt, s, f= self.regular()
+
+
+        Tt = Tt * 1e-5
+        Td = Td * 1e-3
+        
+        
+        m1 = (1 + (T * (torch.exp(-x / Tt) / (1-T+1e-8))))
+        m2 = (1 / (1 + torch.pow((x / Td), f)))
+        m3 = (1 / torch.pow((1+((torch.pow(s, 2)) * torch.pow((x / Td), f))), (0.5)))
+        m4 = G0
+        
+        y = (m1 * m2 * m3 * m4) + c
+        
+        return y
+    
+    def get_params(self):
+        G0, Td, T, Tt, s, f, c = self.regular()
+        G0, Td, T, Tt, s, f, c =G0.data.cpu().numpy()[0], Td.data.cpu().numpy()[0], T.data.cpu().numpy()[0], Tt.data.cpu().numpy()[0], s.data.cpu().numpy()[0], f.data.cpu().numpy()[0], c.data.cpu().numpy()[0]
+        return G0, Td, T,  Tt, s, f, c
+    
+    def set_params(self, c, G0, Td, T, Tt, s, f):
+        if type(G0) == float:
+            self.G0.data = torch.tensor([G0])
+            self.Td.data = torch.tensor([Td])
+            self.T.data = torch.tensor([T])
+            self.Tt.data = torch.tensor([Tt])
+            self.s.data = torch.tensor([s])
+            self.f.data = torch.tensor([f])
+            self.c.data = torch.tensor([c])
+            
+        else:
+            self.G0.data = G0
+            self.Td.data = Td
+            self.T.data = T
+            self.Tt.data = Tt
+            self.s.data = s
+            self.f.data = f
+            self.c.data = c
+            
+def eval(outputs, labels):
+    criterion = nn.MSELoss()
+    loss = criterion(outputs, labels)
+    return loss.cpu().item()
+
+def get_opt_list(model, configs):
+    opt_list = [optim.Adam([params], lr=configs[name][0], weight_decay=configs[name][1]) for name, params in model.named_parameters()]
+    return opt_list
+
+def load_data(path):
+    df = pd.read_csv(path, header=None)
+    return torch.from_numpy(df.to_numpy())
+
+def decorate_params(model):
+    params= model.get_params()
+    _str = ""
+    for x in params:
+        _str += f"{x:.10f}, "
+    return _str.strip().strip(",")
+
+def minmax_norm(y):
+
+    y_min, y_max = y.min(axis=-1, keepdims=True), y.max(axis=-1,keepdims=True)
+    norm_params = (y_max - y_min)
+    y_prime = (y - y_min) / norm_params
+
+    return y_prime, norm_params, y_min
+
+
+def minmax_denorm(data_prime, data_min, data_max):
+    return (data_max - data_min) * data_prime + data_min
+
+
+
+
+if __name__ =="__main__":
+    
+    
+    
+    max_ep = 200
+    # sample_id = 25
+    learning_rate = 8e-3
+    weight_decay = 5e-5
+    seed = 2024
+    
+    configs = {
+        "G0":[learning_rate*5,weight_decay*25],
+        "Td":[learning_rate*5,weight_decay*25], # [1e-5,weight_decay]
+        "T":[learning_rate*5,weight_decay*5],
+        "s":[learning_rate*50, weight_decay*15],
+        "Tt":[learning_rate*10,weight_decay*15],
+        "f":[learning_rate*50,weight_decay*5],
+        "c":[learning_rate*2,weight_decay*2],
+    }
+
+
+    
+    eval_batch_size = 20
+    nosie_gain = 0.1
+    
+    eval_data_array, params = generate_fake_sample(eval_batch_size, nosie_gain)
+    
+    setup_seed(seed)
+    
+    y = eval_data_array[:, :, 1]
+    norm_y, norm_params, y_min = minmax_norm(eval_data_array[:, :, 1])
+    eval_data_array[:, :, 1] = norm_y
+    eval_data_array = torch.from_numpy(eval_data_array).float().cuda()
+    
+    mse_loss = nn.MSELoss()
+    
+    
+    all_params_list = []
+    mse_list = []
+    start_time = time.time()
+    for i in range(eval_batch_size):
+        print(f"sample {i}")
+        x_arr, y_arr = eval_data_array[:, :, 0], eval_data_array[:, :, 1]
+        x, y, ymax, ymin = x_arr[i], y_arr[i], norm_params[i], y_min[i]
+        model = Fit_general_type()
+        model.cuda()
+        
+        loss_function = CorrelationLoss()
+        opt_list = get_opt_list(model, configs)
+        inputs, labels = x, y
+        
+        params_list = []
+        best = dict(loss=970330)
+
+        for ep in range(max_ep):
+            
+            outputs = model(inputs)
+            for opt in opt_list:
+                opt.zero_grad()
+            loss = mse_loss(outputs, labels)
+            if torch.isnan(loss):
+                break
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            for opt in opt_list:
+                opt.step()
+
+            if loss.item() < best['loss']:
+                best = dict(loss=loss.item(), epoch=ep, params=model.get_params())
+                best_mse = mean_squared_error(y.cpu().numpy(), outputs.cpu().detach().numpy())
+            if (ep + 1) % 100 == 0:
+                params_list.append([float(x) for x in model.get_params()])
+        
+        norm_c, norm_N, Td, T, Tt, s, f = best['params']
+        Tt = 10 ** ((-4*Tt)-5)
+        Td = 10 ** ((-4*Td)-2)
+        max = ymax.item()
+        min = ymin.item()
+        N = (norm_N * max)
+        c = ((norm_c * max)) + min
+        
+        all_params_list.append([c, N, Td, T, Tt, s, f])
+        mse_list.append(best_mse)
+        
+    end_time = time.time()
+    fitting_time = end_time - start_time
+    all_params_list = np.array(all_params_list)
+    all_params_mse = mean_squared_error(all_params_list, params)
+    mse_per_param = {}
+    param_names = ['c', 'N', 'Td', 'T', 'Tt', 's', 'f']
+    
+    for idx, name in enumerate(param_names):
+            mse_per_param[name] = mean_squared_error(params[:, idx], all_params_list[:, idx])   
+    print(f"params_mse: {all_params_mse}")
+    print(f"data: {np.mean(mse_list)}")
+    print(f"fitting time: {fitting_time}")
+    for param, mse in mse_per_param.items():
+        print(f"MSE for {param}: {mse}")
+    
